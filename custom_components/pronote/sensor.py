@@ -116,6 +116,7 @@ async def async_setup_entry(
         ),
         # generic sensors
         PronoteInformationAndSurveysSensor(coordinator),
+        PronoteDiscussionsSensor(coordinator),
         PronoteGenericSensor(
             coordinator, "ical_url", "Timetable iCal URL",
             translation_key="ical_url",
@@ -795,6 +796,9 @@ class PronoteMenusSensor(PronoteGenericSensor):
 class PronoteInformationAndSurveysSensor(PronoteGenericSensor):
     """Representation of a Pronote sensor."""
 
+    # A month of whole texts: too large for the recorder
+    _unrecorded_attributes = frozenset({"information_and_surveys"})
+
     def __init__(self, coordinator) -> None:
         """Initialize the Pronote sensor."""
         super().__init__(
@@ -816,15 +820,42 @@ class PronoteInformationAndSurveysSensor(PronoteGenericSensor):
             for information_and_survey in self.coordinator.data[
                 "information_and_surveys"
             ]:
-                information_and_surveys.append(
-                    format_information_and_survey(information_and_survey)
-                )
+                formatted = format_information_and_survey(information_and_survey)
+                answered = (self.coordinator.data.get("information_acknowledgments") or {}).get(formatted["key"])
+                formatted["acknowledged"] = answered is not None
+                formatted["acknowledged_at"] = answered
+                information_and_surveys.append(formatted)
                 if information_and_survey.read is False:
                     unread_count += 1
 
         attributes["unread_count"] = unread_count
         attributes["information_and_surveys"] = information_and_surveys
 
+        return attributes
+
+
+class PronoteDiscussionsSensor(PronoteGenericSensor):
+    """Discussions of the messagerie, state is the number of unread messages."""
+
+    # Whole messages: too large for the recorder
+    _unrecorded_attributes = frozenset({"discussions"})
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(
+            coordinator, "discussions", "Discussions", translation_key="discussions"
+        )
+
+    @property
+    def native_value(self):
+        discussions = self.coordinator.data.get("discussions")
+        if discussions is None:
+            return None
+        return sum(d["unread"] for d in discussions)
+
+    @property
+    def extra_state_attributes(self):
+        attributes = super().extra_state_attributes
+        attributes["discussions"] = self.coordinator.data.get("discussions") or []
         return attributes
 
 

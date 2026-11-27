@@ -1,3 +1,12 @@
+> **Unofficial `messagerie` branch** (noiwid/hass-pronote), based on 2.8.0, until the pull requests below are merged upstream:
+> - messaging: a `[...]_discussions` sensor with the unread messages of each discussion, and a `new_message` event (#176, #237);
+> - information: `read`, `acknowledgment_required`, `acknowledged` attributes, and the `pronote.mark_as_read` action to mark an information or a discussion as read and to confirm reading (#236);
+> - all grades of the period in the grades sensor (the dashboard paginates them);
+> - [section-card](https://github.com/noiwid/section-card) is embedded and loaded on every dashboard, no resource to add.
+>
+> Install: HACS > three dots > Custom repositories > `https://github.com/noiwid/hass-pronote`, category Integration, then download the latest `messagerie` release and restart Home Assistant.
+> To go back to the official integration, remove this custom repository and reinstall Pronote from HACS. section-card then has to be installed on its own.
+
 # Pronote integration for Home Assistant
 
 ## Installation

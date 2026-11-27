@@ -38,6 +38,9 @@ from . import pronotepy_hotfix  # noqa: F401
 import json
 import logging
 import re
+from datetime import datetime
+
+from .pronote_formatter import information_answer, information_key, stable_key
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -206,3 +209,175 @@ def get_day_start_at(lessons):
                 break
 
     return day_start_at
+
+
+DISCUSSIONS_MAX = 10
+DISCUSSION_MESSAGES_MIN = 3
+MESSAGE_CONTENT_MAX = 4000
+
+
+def fetch_discussions(client) -> list:
+    """[(stable key, pronotepy discussion, its messages)], most recent first, without trash and drafts.
+
+    Reading the messages does not mark them as read.
+    """
+    fetched = []
+    discussions = [
+        d for d in client.discussions() if not ({"Trash", "Drafts"} & set(d.labels))
+    ][:DISCUSSIONS_MAX]
+    for discussion in discussions:
+        messages = discussion.messages
+        first = messages[0].created if messages else None
+        fetched.append(
+            (stable_key(discussion.subject, discussion.creator, first), discussion, messages)
+        )
+    return sorted(
+        fetched,
+        key=lambda item: item[2][-1].created if item[2] else datetime.min,
+        reverse=True,
+    )
+
+
+def format_discussions(fetched: list) -> list:
+    """Plain dicts for the sensor. Every unread message is kept: marking as read marks the whole discussion."""
+    result = []
+    for key, discussion, messages in fetched:
+        keep = max(DISCUSSION_MESSAGES_MIN, discussion.unread)
+        result.append({
+            "key": key,
+            "subject": discussion.subject,
+            "creator": discussion.creator,
+            "unread": discussion.unread,
+            "closed": discussion.closed,
+            "last_date": messages[-1].created if messages else None,
+            "message_count": len(messages),
+            "messages": [
+                {
+                    "key": stable_key(key, message.created, message.author, (message.content or "")[:40]),
+                    "author": message.author,
+                    "date": message.created,
+                    "seen": message.seen,
+                    "content": (message.content or "")[:MESSAGE_CONTENT_MAX],
+                }
+                for message in messages[-keep:]
+            ],
+        })
+    return result
+
+
+def _raw_informations(client) -> dict:
+    """{stable key: raw PRONOTE item} of the information tab: saving an item needs its own "public" field."""
+    response = client.post(
+        "PageActualites", 8, {"modesAffActus": {"_T": 26, "V": "[0..3]"}}
+    )
+    raws = {}
+    for mode in response["dataSec"]["data"]["listeModesAff"]:
+        for raw in mode["listeActualites"]["V"]:
+            raws[information_key(pronotepy.dataClasses.Information(client, raw))] = raw
+    return raws
+
+
+def information_acknowledgments(client) -> dict:
+    """{stable key: when the acknowledgment was given, or None}, from the information list.
+
+    The detail of an information always reads "not answered" on a parent account:
+    only the list ("informationListeContenu") tells who answered and when.
+    """
+    return {
+        key: ((raw.get("informationListeContenu") or {}).get("reponduLe") or {}).get("V")
+        for key, raw in _raw_informations(client).items()
+    }
+
+
+def mark_information(client, raw: dict, read: bool, acknowledge: bool = False) -> str:
+    """SaisieActualites as the PRONOTE web client sends it. Returns "read", "unread" or "acknowledged".
+
+    pronotepy's Information.mark_as_read lacks genreSaisie and estPublic and sends the wrong
+    genrePublic: PRONOTE answers with a RapportSaisie error and changes nothing.
+    Read and acknowledged are two separate states: the acknowledgment an information may expect
+    is only given when acknowledge is set.
+    """
+    questions = []
+    sent = "read" if read else "unread"
+    already = (raw.get("informationListeContenu") or {}).get("reponduLe")
+    if read and acknowledge and not already:
+        information = pronotepy.dataClasses.Information(client, raw)
+        information._fetch_content()
+        answer = information_answer(information)
+        if answer.get("estReponseAttendue"):
+            question = information._raw_content[0]
+            questions = [
+                {
+                    "N": question["N"],
+                    "L": question.get("L", ""),
+                    "E": 2,
+                    "genreReponse": question["genreReponse"],
+                    "reponse": {
+                        "N": answer.get("N"),
+                        "E": 2,
+                        "valeurReponse": "",
+                        "avecReponse": True,
+                        "estReponseAttendue": True,
+                    },
+                }
+            ]
+            sent = "acknowledged"
+    response = client.post(
+        "SaisieActualites",
+        8,
+        {
+            "genreSaisie": 0,
+            "listeActualites": [
+                {
+                    "N": raw["N"],
+                    "L": raw.get("L", ""),
+                    "validationDirecte": True,
+                    "genrePublic": raw.get("genrePublic", raw["public"]["V"]["G"]),
+                    "public": raw["public"]["V"],
+                    "estPublic": raw.get("estPublic"),
+                    "lue": read,
+                    "supprimee": False,
+                    "marqueLueSeulement": not questions,
+                    "saisieActualite": False,
+                    "listeQuestions": questions,
+                }
+            ],
+            "saisieActualite": False,
+        },
+    )
+    if ((response.get("dataSec") or {}).get("RapportSaisie") or {}).get("_erreurSaisie_"):
+        raise ValueError("PRONOTE refused the request")
+    return sent
+
+
+def apply_read_marks(client, marks: list, fetched_discussions: list) -> None:
+    """Apply the marks queued by the pronote.mark_as_read service, one attempt each."""
+    discussions = {key: discussion for key, discussion, _ in fetched_discussions}
+    informations = None
+    for mark in marks:
+        kind, key, read = mark["kind"], mark["key"], mark["read"]
+        try:
+            if kind == "discussion":
+                target = discussions.get(key)
+                if target is None:
+                    _LOGGER.warning("Pronote discussion %s not found, read mark dropped", key)
+                    continue
+                target.mark_as(read)
+                sent = "read" if read else "unread"
+            else:
+                if informations is None:
+                    informations = _raw_informations(client)
+                raw = informations.get(key)
+                if raw is None:
+                    _LOGGER.warning("Pronote information %s not found, read mark dropped", key)
+                    continue
+                sent = mark_information(client, raw, read, mark.get("acknowledge", False))
+            _LOGGER.debug("Pronote %s %s marked as %s", kind, key, sent)
+        except pronotepy.exceptions.PronoteAPIError as ex:
+            # pronotepy has logged in again: what was fetched before is stale, stop here
+            _LOGGER.warning("Could not mark pronote %s %s, remaining read marks dropped: %s", kind, key, ex)
+            break
+        except Exception as ex:
+            _LOGGER.warning(
+                "Could not mark pronote %s %s as %s: %s", kind, key, "read" if read else "unread", ex
+            )

@@ -1,0 +1,31 @@
+mark_as_read:
+  name: Mark as read
+  description: Mark an information or a discussion as read (or unread) in Pronote. It is applied by a refresh requested right away.
+  fields:
+    kind:
+      name: Kind
+      description: What to mark.
+      required: true
+      selector:
+        select:
+          options:
+            - information
+            - discussion
+    key:
+      name: Key
+      description: The "key" of the item, from the attributes of the sensor.
+      required: true
+      selector:
+        text:
+    read:
+      name: Read
+      description: Turn off to mark as unread.
+      default: true
+      selector:
+        boolean:
+    acknowledge:
+      name: Acknowledge
+      description: Also give the acknowledgment an information expects. Without it, such an information stays unread.
+      default: false
+      selector:
+        boolean:
